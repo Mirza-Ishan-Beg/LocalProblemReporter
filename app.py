@@ -1,31 +1,36 @@
 """
-Local Problem Reporter — Flask backend.
+Local Problem Reporter — Flask backend for Render.
 
 Endpoints
 ---------
-GET    /                     → serves index.html
-GET    /uploads/<filename>   → serves an uploaded photo
-GET    /api/reports          → list reports (?category=Pothole)
-POST   /api/reports          → create a report (multipart/form-data)
-DELETE /api/reports          → delete ALL reports
-DELETE /api/reports/<id>     → delete ONE report
+GET    /                             → serves index.html
+GET    /static/<file>                → Flask serves static assets
+GET    /api/reports                  → list reports (?category=Pothole)
+GET    /api/reports/<id>/photo       → serve the stored image bytes
+POST   /api/reports                  → create a report (multipart/form-data)
+DELETE /api/reports                  → delete ALL reports
+DELETE /api/reports/<id>             → delete ONE report
+
+Storage
+-------
+- Rows    → Postgres (Aiven).        DATABASE_URL
+- Photos  → Postgres BYTEA column.   No external service.
 """
 
 import os
-import sqlite3
-import uuid
 from datetime import datetime, timezone
 
+import psycopg
+from psycopg.rows import dict_row
+
 from flask import (
-    Flask, g, jsonify, render_template, request, send_from_directory
+    Flask, g, jsonify, render_template, request, Response
 )
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-DB_PATH = os.path.join(BASE_DIR, "reports.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 VALID_CATEGORIES = {
@@ -43,18 +48,13 @@ MAX_DESCRIPTION = 500
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
 
 # --------------------------------------------------------------------------- #
-# Database helpers
+# Database
 # --------------------------------------------------------------------------- #
 def get_db():
-    """One SQLite connection per request, stored on Flask's `g`."""
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = psycopg.connect(DATABASE_URL, row_factory=dict_row)
     return g.db
 
 
@@ -62,45 +62,21 @@ def get_db():
 def close_db(_exc):
     db = g.pop("db", None)
     if db is not None:
-        db.close()
-
-
-def init_db():
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute("PRAGMA journal_mode = WAL")   # better concurrent reads
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reports (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT    NOT NULL,
-                category    TEXT    NOT NULL,
-                location    TEXT    NOT NULL,
-                description TEXT    NOT NULL,
-                photo       TEXT,                 -- stored filename or NULL
-                created_at  TEXT    NOT NULL      -- ISO-8601 UTC
-            )
-            """
-        )
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reports_category "
-            "ON reports(category)"
-        )
-        db.commit()
-
-
-init_db()   # runs on import, so it also works under gunicorn
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def row_to_dict(row):
-    """Shape a DB row exactly like the old localStorage objects."""
     return {
         "id":          row["id"],
         "name":        row["name"],
         "category":    row["category"],
         "location":    row["location"],
         "description": row["description"],
-        "photo":       f"/uploads/{row['photo']}" if row["photo"] else "",
-        "date":        row["created_at"],          # ISO string; JS formats it
+        "photo":       f"/api/reports/{row['id']}/photo" if row["photo"] else "",
+        "date":        row["created_at"].isoformat() if row["created_at"] else "",
     }
 
 
@@ -109,17 +85,11 @@ def allowed_file(filename: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Pages & static files
+# Pages
 # --------------------------------------------------------------------------- #
 @app.get("/")
 def index():
     return render_template("index.html")
-
-
-@app.get("/uploads/<path:filename>")
-def uploaded_file(filename):
-    # send_from_directory blocks path traversal
-    return send_from_directory(UPLOAD_DIR, filename)
 
 
 # --------------------------------------------------------------------------- #
@@ -128,21 +98,58 @@ def uploaded_file(filename):
 @app.get("/api/reports")
 def list_reports():
     category = request.args.get("category", "All")
+    if category and category != "All" and category not in VALID_CATEGORIES:
+        return jsonify({"errors": ["Unknown category."]}), 400
 
-    db = get_db()
-    if category and category != "All":
-        if category not in VALID_CATEGORIES:
-            return jsonify({"errors": ["Unknown category."]}), 400
-        rows = db.execute(
-            "SELECT * FROM reports WHERE category = ? ORDER BY id DESC",
-            (category,),
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT * FROM reports ORDER BY id DESC"
-        ).fetchall()
+    with get_db().cursor() as cur:
+        if category and category != "All":
+            cur.execute(
+                "SELECT id, name, category, location, description, "
+                "(photo IS NOT NULL) AS has_photo, created_at "
+                "FROM reports WHERE category = %s ORDER BY id DESC",
+                (category,),
+            )
+        else:
+            cur.execute(
+                "SELECT id, name, category, location, description, "
+                "(photo IS NOT NULL) AS has_photo, created_at "
+                "FROM reports ORDER BY id DESC"
+            )
+        rows = cur.fetchall()
 
-    return jsonify([row_to_dict(r) for r in rows])
+    # List endpoint does NOT include the raw bytes — just a has_photo flag.
+    # row_to_dict expects a "photo" key, so adapt here.
+    def shape(r):
+        return {
+            "id":          r["id"],
+            "name":        r["name"],
+            "category":    r["category"],
+            "location":    r["location"],
+            "description": r["description"],
+            "photo":       f"/api/reports/{r['id']}/photo" if r["has_photo"] else "",
+            "date":        r["created_at"].isoformat() if r["created_at"] else "",
+        }
+
+    return jsonify([shape(r) for r in rows])
+
+
+@app.get("/api/reports/<int:report_id>/photo")
+def get_report_photo(report_id):
+    with get_db().cursor() as cur:
+        cur.execute(
+            "SELECT photo, photo_type FROM reports WHERE id = %s",
+            (report_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None or not row["photo"]:
+        return jsonify({"errors": ["No photo found."]}), 404
+
+    return Response(
+        bytes(row["photo"]),
+        mimetype=row["photo_type"] or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -173,63 +180,55 @@ def create_report():
     if errors:
         return jsonify({"errors": errors}), 400
 
-    # Per-file size check (MAX_CONTENT_LENGTH only caps the whole request)
-    photo.stream.seek(0, os.SEEK_END)
-    size = photo.stream.tell()
-    photo.stream.seek(0)
-    if size > MAX_PHOTO_BYTES:
-        return jsonify({"errors": ["Photo must be smaller than 2 MB."]}), 400
-    if size == 0:
+    data = photo.read()
+    if not data:
         return jsonify({"errors": ["The uploaded photo is empty."]}), 400
+    if len(data) > MAX_PHOTO_BYTES:
+        return jsonify({"errors": ["Photo must be smaller than 2 MB."]}), 400
 
-    # Save with a random name — never trust the client's filename
-    ext = photo.filename.rsplit(".", 1)[1].lower()
-    stored_name = f"{uuid.uuid4().hex}.{ext}"
-    photo.save(os.path.join(UPLOAD_DIR, stored_name))
+    content_type = photo.mimetype or "application/octet-stream"
+    created_at = datetime.now(timezone.utc)
 
-    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        db = get_db()
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reports
+                    (name, category, location, description,
+                     photo, photo_type, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name, category, location, description,
+                          (photo IS NOT NULL) AS has_photo, created_at
+                """,
+                (name, category, location, description,
+                 data, content_type, created_at),
+            )
+            row = cur.fetchone()
+        db.commit()
+    except Exception:
+        app.logger.exception("DB insert failed")
+        return jsonify({"errors": ["Could not save report."]}), 500
 
-    db = get_db()
-    cur = db.execute(
-        """
-        INSERT INTO reports (name, category, location, description, photo, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (name, category, location, description, stored_name, created_at),
-    )
-    db.commit()
-
-    row = db.execute(
-        "SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)
-    ).fetchone()
-
-    return jsonify(row_to_dict(row)), 201
+    return jsonify({
+        "id":          row["id"],
+        "name":        row["name"],
+        "category":    row["category"],
+        "location":    row["location"],
+        "description": row["description"],
+        "photo":       f"/api/reports/{row['id']}/photo" if row["has_photo"] else "",
+        "date":        row["created_at"].isoformat() if row["created_at"] else "",
+    }), 201
 
 
 # --------------------------------------------------------------------------- #
 # API — delete
 # --------------------------------------------------------------------------- #
-def _delete_photo(filename):
-    if not filename:
-        return
-    path = os.path.join(UPLOAD_DIR, filename)
-    if os.path.isfile(path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-
 @app.delete("/api/reports")
 def clear_reports():
     db = get_db()
-    rows = db.execute(
-        "SELECT photo FROM reports WHERE photo IS NOT NULL"
-    ).fetchall()
-    for r in rows:
-        _delete_photo(r["photo"])
-
-    db.execute("DELETE FROM reports")
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM reports")
     db.commit()
     return jsonify({"ok": True})
 
@@ -237,14 +236,12 @@ def clear_reports():
 @app.delete("/api/reports/<int:report_id>")
 def delete_report(report_id):
     db = get_db()
-    row = db.execute(
-        "SELECT photo FROM reports WHERE id = ?", (report_id,)
-    ).fetchone()
-    if row is None:
-        return jsonify({"errors": ["Report not found."]}), 404
-
-    _delete_photo(row["photo"])
-    db.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+    with db.cursor() as cur:
+        cur.execute("SELECT id FROM reports WHERE id = %s", (report_id,))
+        row = cur.fetchone()
+        if row is None:
+            return jsonify({"errors": ["Report not found."]}), 404
+        cur.execute("DELETE FROM reports WHERE id = %s", (report_id,))
     db.commit()
     return jsonify({"ok": True})
 
@@ -271,6 +268,8 @@ def server_error(_e):
     return "Internal server error", 500
 
 
+# --------------------------------------------------------------------------- #
+# Local dev
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
