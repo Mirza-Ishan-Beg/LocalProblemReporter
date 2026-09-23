@@ -10,8 +10,7 @@ class GroqProvider(LLMProvider):
     name = "groq"
 
     ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-    MODEL    = "llama-3.3-70b-versatile"
-
+    MODEL    = "openai/gpt-oss-120b"
     def __init__(self):
         self.api_key = os.environ.get("GROQ_API_KEY", "")
         if not self.api_key:
