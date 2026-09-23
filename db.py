@@ -31,19 +31,24 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category);
 """
 
-
 def init_db(app=None):
     """Create schema if missing. Safe to call on every startup."""
-    log = app.logger if app else print
     if not DATABASE_URL:
-        log("DATABASE_URL not set; skipping schema init.")
+        if app:
+            app.logger.warning("DATABASE_URL not set; skipping schema init.")
+        else:
+            print("DATABASE_URL not set; skipping schema init.")
         return
+
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute(SCHEMA)
             conn.commit()
-        log("Schema ready.")
+        if app:
+            app.logger.info("Schema ready.")
+        else:
+            print("Schema ready.")
     except Exception:
         if app:
             app.logger.exception("Schema init failed")
