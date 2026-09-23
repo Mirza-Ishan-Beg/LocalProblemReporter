@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Local Problem Reporter</title>
+        <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+        <header class="header">
+                <div class="container nav">
+                        <a class="logo" href="#">Local<span>Reporter</span></a>
+                        <nav>
+                                <a href="#report">Report</a>
+                                <a href="#issues">Issues</a>
+                                <a href="#reports">Reports</a>
+                        </nav>
+                        <a class="btn btn-small" href="#report">Report a Problem</a>
+                </div>
+        </header>
+
+        <main>
+                <section class="hero">
+                        <div class="container hero-grid">
+                                <div>
+                                        <p class="eyebrow">YOUR COMMUNITY • YOUR VOICE</p>
+                                        <h1>Make local problems <span>visible.</span></h1>
+                                        <p class="hero-text">Report potholes, garbage, broken streetlights, blocked
+                                                drains and other neighborhood issues with a photo, location and short
+                                                description.</p>
+                                        <div class="hero-actions">
+                                                <a class="btn" href="#report">Report an Issue</a>
+                                                <a class="btn btn-outline" href="#reports">View Reports</a>
+                                        </div>
+                                </div>
+                                <div class="hero-card">
+                                        <div class="map-dot">📍</div>
+                                        <div>
+                                                <strong>Spot it. Report it.</strong>
+                                                <p>Help document issues around your community.</p>
+                                        </div>
+                                </div>
+                        </div>
+                </section>
+
+                <section id="issues" class="section">
+                        <div class="container">
+                                <p class="eyebrow">WHAT YOU CAN REPORT</p>
+                                <h2>Common local issues</h2>
+                                <div class="issue-grid">
+                                        <button class="issue-card"
+                                                data-category="Pothole">🛣️<strong>Potholes</strong><span>Road damage
+                                                        and unsafe surfaces</span></button>
+                                        <button class="issue-card"
+                                                data-category="Garbage">🗑️<strong>Garbage</strong><span>Overflowing
+                                                        bins and dumping</span></button>
+                                        <button class="issue-card"
+                                                data-category="Streetlight">💡<strong>Streetlights</strong><span>Broken
+                                                        or non-working lights</span></button>
+                                        <button class="issue-card"
+                                                data-category="Drainage">🚰<strong>Drainage</strong><span>Blocked drains
+                                                        and sewage</span></button>
+                                        <button class="issue-card"
+                                                data-category="Pollution">🌱<strong>Pollution</strong><span>Polluted or
+                                                        littered areas</span></button>
+                                        <button class="issue-card"
+                                                data-category="Other">🔧<strong>Other</strong><span>Any other
+                                                        maintenance issue</span></button>
+                                </div>
+                        </div>
+                </section>
+
+                <section id="report" class="section report-section">
+                        <div class="container report-grid">
+                                <div>
+                                        <p class="eyebrow">REPORT NOW</p>
+                                        <h2>Submit a local problem</h2>
+                                        <p>Give enough detail for someone reviewing the report to understand exactly
+                                                what needs attention.</p>
+                                        <div class="steps">
+                                                <div><b>01</b><span>Upload a clear photo</span></div>
+                                                <div><b>02</b><span>Add the location</span></div>
+                                                <div><b>03</b><span>Describe the issue</span></div>
+                                        </div>
+                                </div>
+
+                                <form id="reportForm" class="form-card">
+                                        <label>Name
+                                                <input id="name" type="text" placeholder="Your name" required>
+                                        </label>
+                                        <label>Problem type
+                                                <select id="category" required>
+                                                        <option value="">Select an issue</option>
+                                                        <option>Pothole</option>
+                                                        <option>Garbage</option>
+                                                        <option>Streetlight</option>
+                                                        <option>Drainage</option>
+                                                        <option>Pollution</option>
+                                                        <option>Other</option>
+                                                </select>
+                                        </label>
+                                        <label>Location / ZIP code
+                                                <div class="location-row">
+                                                        <input id="location" type="text"
+                                                                placeholder="e.g. Gomti Nagar, Lucknow" required>
+                                                        <button type="button" id="locateBtn" class="btn btn-outline">Use
+                                                                GPS</button>
+                                                </div>
+                                        </label>
+                                        <label>Photo
+                                                <input id="photo" type="file" accept="image/*" required>
+                                        </label>
+                                        <div id="preview" class="preview hidden"></div>
+                                        <label>Description
+                                                <textarea id="description" rows="5" maxlength="500"
+                                                        placeholder="Briefly explain the problem..."
+                                                        required></textarea>
+                                        </label>
+                                        <button class="btn full" type="submit">Submit Report</button>
+                                        <p id="formMessage" class="form-message"></p>
+                                </form>
+                        </div>
+                </section>
+
+                <section id="reports" class="section">
+                        <div class="container">
+                                <div class="section-heading">
+                                        <div>
+                                                <p class="eyebrow">COMMUNITY REPORTS</p>
+                                                <h2>Recent reports</h2>
+                                        </div>
+                                        <div class="filters">
+                                                <select id="filter">
+                                                        <option value="All">All issues</option>
+                                                        <option>Pothole</option>
+                                                        <option>Garbage</option>
+                                                        <option>Streetlight</option>
+                                                        <option>Drainage</option>
+                                                        <option>Pollution</option>
+                                                        <option>Other</option>
+                                                </select>
+                                                <button id="clearReports" class="text-btn">Clear local reports</button>
+                                        </div>
+                                </div>
+                                <div id="reportList" class="report-list"></div>
+                        </div>
+                </section>
+        </main>
+
+        <footer>
+                <div class="container footer-inner">
+                        <strong>Local Problem Reporter</strong>
+                        <span>Built to make community issues easier to document.</span>
+                </div>
+        </footer>
+        <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+
+</html>
