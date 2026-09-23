@@ -85,13 +85,13 @@
                                                 <div><b>03</b><span>Describe the issue</span></div>
                                         </div>
                                 </div>
-
                                 <form id="reportForm" class="form-card">
                                         <label>Name
-                                                <input id="name" type="text" placeholder="Your name" required>
+                                                <input id="name" name="name" type="text" placeholder="Your name"
+                                                        required>
                                         </label>
                                         <label>Problem type
-                                                <select id="category" required>
+                                                <select id="category" name="category" required>
                                                         <option value="">Select an issue</option>
                                                         <option>Pothole</option>
                                                         <option>Garbage</option>
@@ -103,24 +103,25 @@
                                         </label>
                                         <label>Location / ZIP code
                                                 <div class="location-row">
-                                                        <input id="location" type="text"
+                                                        <input id="location" name="location" type="text"
                                                                 placeholder="e.g. Gomti Nagar, Lucknow" required>
                                                         <button type="button" id="locateBtn" class="btn btn-outline">Use
                                                                 GPS</button>
                                                 </div>
                                         </label>
                                         <label>Photo
-                                                <input id="photo" type="file" accept="image/*" required>
+                                                <input id="photo" name="photo" type="file" accept="image/*" required>
                                         </label>
                                         <div id="preview" class="preview hidden"></div>
                                         <label>Description
-                                                <textarea id="description" rows="5" maxlength="500"
+                                                <textarea id="description" name="description" rows="5" maxlength="500"
                                                         placeholder="Briefly explain the problem..."
                                                         required></textarea>
                                         </label>
                                         <button class="btn full" type="submit">Submit Report</button>
                                         <p id="formMessage" class="form-message"></p>
                                 </form>
+
                         </div>
                 </section>
 
