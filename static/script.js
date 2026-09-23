@@ -465,3 +465,73 @@ document
 
 loadReports();
 
+
+/* ---------------- chat widget ---------------- */
+(() => {
+        const toggle = document.getElementById("chatToggle");
+        const panel = document.getElementById("chatPanel");
+        const closeBtn = document.getElementById("chatClose");
+        const msgBox = document.getElementById("chatMessages");
+        const form = document.getElementById("chatForm");
+        const input = document.getElementById("chatInput");
+
+        if (!toggle || !panel || !form) return;   // widget not present → no-op
+
+        // Conversation history sent to the server each turn.
+        const history = [];
+
+        const addMsg = (role, text) => {
+                const el = document.createElement("div");
+                el.className = `chat-msg ${role}`;
+                el.textContent = text;
+                msgBox.appendChild(el);
+                msgBox.scrollTop = msgBox.scrollHeight;
+                return el;
+        };
+
+        toggle.addEventListener("click", () => {
+                panel.classList.toggle("hidden");
+                if (!panel.classList.contains("hidden")) input.focus();
+        });
+
+        closeBtn.addEventListener("click", () => panel.classList.add("hidden"));
+
+        form.addEventListener("submit", async e => {
+                e.preventDefault();
+                const text = input.value.trim();
+                if (!text) return;
+
+                addMsg("user", text);
+                history.push({ role: "user", content: text });
+                input.value = "";
+                input.disabled = true;
+
+                const thinking = addMsg("assistant", "…");
+
+                try {
+                        const res = await fetch("/api/chat", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ messages: history }),
+                        });
+                        const data = await res.json();
+
+                        if (!res.ok) {
+                                thinking.remove();
+                                addMsg("error", (data.errors || ["Something went wrong."]).join(" "));
+                                history.pop();                 // don't keep failed user turn
+                                return;
+                        }
+
+                        thinking.textContent = data.reply;
+                        history.push({ role: "assistant", content: data.reply });
+                } catch (err) {
+                        thinking.remove();
+                        addMsg("error", "Network error — could not reach the assistant.");
+                        history.pop();
+                } finally {
+                        input.disabled = false;
+                        input.focus();
+                }
+        });
+})();

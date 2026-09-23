@@ -157,7 +157,29 @@
                         <span>Built to make community issues easier to document.</span>
                 </div>
         </footer>
+
+               <!-- Chat widget -->
+        <button id="chatToggle" class="chat-toggle" aria-label="Open chat">
+                💬
+        </button>
+
+        <div id="chatPanel" class="chat-panel hidden">
+                <div class="chat-header">
+                        <strong>Community Assistant</strong>
+                        <button id="chatClose" class="chat-close" aria-label="Close">✕</button>
+                </div>
+               <div id="chatMessages" class="chat-messages">
+        <div class="chat-msg assistant">🤖Hi! How can I help you today?</div>
+</div>
+                <form id="chatForm" class="chat-input-row">
+                        <input id="chatInput" type="text" placeholder="Ask something…" autocomplete="off"
+                                maxlength="2000">
+                        <button type="submit" class="btn btn-small">Send</button>
+                </form>
+        </div>
+
         <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
+
 
 </html>
