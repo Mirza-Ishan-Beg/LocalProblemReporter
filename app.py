@@ -20,7 +20,8 @@ Storage
 
 import os
 from datetime import datetime, timezone
-
+from dotenv import load_dotenv
+load_dotenv(".env.local")
 import requests
 from flask import (
     Flask, jsonify, render_template, request, Response
