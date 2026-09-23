@@ -1,45 +1,27 @@
 """
 Local Problem Reporter — Flask backend for Render.
-
-Endpoints
----------
-GET    /                             → serves index.html
-GET    /static/<file>                → Flask serves static assets
-GET    /api/reports                  → list reports (?category=Pothole)
-GET    /api/reports/<id>/photo       → serve the stored image bytes
-POST   /api/reports                  → create a report (multipart/form-data)
-DELETE /api/reports                  → delete ALL reports
-DELETE /api/reports/<id>             → delete ONE report
-
-Storage
--------
-- Rows    → Postgres (Aiven).        DATABASE_URL
-- Photos  → Postgres BYTEA column.   No external service.
 """
 
 import os
 from datetime import datetime, timezone
 
-import psycopg
-from psycopg.rows import dict_row
-
 from flask import (
-    Flask, g, jsonify, render_template, request, Response
+    Flask, jsonify, render_template, request, Response
 )
+
+from db import init_db, get_db, close_db
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 VALID_CATEGORIES = {
     "Pothole", "Garbage", "Streetlight",
     "Drainage", "Pollution", "Other",
 }
 
-MAX_REQUEST_BYTES = 8 * 1024 * 1024   # whole multipart request
-MAX_PHOTO_BYTES   = 2 * 1024 * 1024   # per photo (matches frontend check)
+MAX_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_PHOTO_BYTES   = 2 * 1024 * 1024
 
 MAX_NAME        = 80
 MAX_LOCATION    = 200
@@ -48,38 +30,16 @@ MAX_DESCRIPTION = 500
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
+# Bootstrap schema once at startup
+init_db(app)
+
+# Register teardown
+app.teardown_appcontext(close_db)
+
 
 # --------------------------------------------------------------------------- #
-# Database
+# Helpers
 # --------------------------------------------------------------------------- #
-def get_db():
-    if "db" not in g:
-        g.db = psycopg.connect(DATABASE_URL, row_factory=dict_row)
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(_exc):
-    db = g.pop("db", None)
-    if db is not None:
-        try:
-            db.close()
-        except Exception:
-            pass
-
-
-def row_to_dict(row):
-    return {
-        "id":          row["id"],
-        "name":        row["name"],
-        "category":    row["category"],
-        "location":    row["location"],
-        "description": row["description"],
-        "photo":       f"/api/reports/{row['id']}/photo" if row["photo"] else "",
-        "date":        row["created_at"].isoformat() if row["created_at"] else "",
-    }
-
-
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -117,8 +77,6 @@ def list_reports():
             )
         rows = cur.fetchall()
 
-    # List endpoint does NOT include the raw bytes — just a has_photo flag.
-    # row_to_dict expects a "photo" key, so adapt here.
     def shape(r):
         return {
             "id":          r["id"],
