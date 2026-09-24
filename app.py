@@ -43,7 +43,7 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_PHOTO_BYTES   = 2 * 1024 * 1024
 
 MAX_NAME        = 80
-MAX_LOCATION    = 200
+MAX_LOCATION    = 500      # full Nominatim addresses can be long
 MAX_DESCRIPTION = 500
 
 MAX_CHAT_MESSAGES    = 20
@@ -65,6 +65,34 @@ app.teardown_appcontext(close_db)
 # --------------------------------------------------------------------------- #
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def parse_coordinate(raw: str, *, minimum: float, maximum: float):
+    """Return (value, error_message). value is None if raw is empty."""
+    if not raw:
+        return None, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, "not a number"
+    if not (minimum <= value <= maximum):
+        return None, f"must be between {minimum} and {maximum}"
+    return value, None
+
+
+def shape_report(r) -> dict:
+    """Uniform JSON shape for a report row (dict_row)."""
+    return {
+        "id":          r["id"],
+        "name":        r["name"],
+        "category":    r["category"],
+        "location":    r["location"],
+        "latitude":    float(r["latitude"])  if r["latitude"]  is not None else None,
+        "longitude":   float(r["longitude"]) if r["longitude"] is not None else None,
+        "description": r["description"],
+        "photo":       f"/api/reports/{r['id']}/photo" if r["has_photo"] else "",
+        "date":        r["created_at"].isoformat() if r["created_at"] else "",
+    }
 
 
 def build_system_prompt() -> str:
@@ -117,31 +145,20 @@ def list_reports():
     with get_db().cursor() as cur:
         if category and category != "All":
             cur.execute(
-                "SELECT id, name, category, location, description, "
-                "(photo IS NOT NULL) AS has_photo, created_at "
+                "SELECT id, name, category, location, latitude, longitude, "
+                "description, (photo IS NOT NULL) AS has_photo, created_at "
                 "FROM reports WHERE category = %s ORDER BY id DESC",
                 (category,),
             )
         else:
             cur.execute(
-                "SELECT id, name, category, location, description, "
-                "(photo IS NOT NULL) AS has_photo, created_at "
+                "SELECT id, name, category, location, latitude, longitude, "
+                "description, (photo IS NOT NULL) AS has_photo, created_at "
                 "FROM reports ORDER BY id DESC"
             )
         rows = cur.fetchall()
 
-    def shape(r):
-        return {
-            "id":          r["id"],
-            "name":        r["name"],
-            "category":    r["category"],
-            "location":    r["location"],
-            "description": r["description"],
-            "photo":       f"/api/reports/{r['id']}/photo" if r["has_photo"] else "",
-            "date":        r["created_at"].isoformat() if r["created_at"] else "",
-        }
-
-    return jsonify([shape(r) for r in rows])
+    return jsonify([shape_report(r) for r in rows])
 
 
 @app.get("/api/reports/<int:report_id>/photo")
@@ -174,6 +191,9 @@ def create_report():
     description = (request.form.get("description") or "").strip()
     photo       = request.files.get("photo")
 
+    latitude_raw  = (request.form.get("latitude")  or "").strip()
+    longitude_raw = (request.form.get("longitude") or "").strip()
+
     errors = []
     if not name or len(name) > MAX_NAME:
         errors.append(f"Name is required (max {MAX_NAME} characters).")
@@ -187,6 +207,20 @@ def create_report():
         errors.append("A photo is required.")
     elif not allowed_file(photo.filename):
         errors.append("Unsupported image type (png, jpg, jpeg, gif, webp).")
+
+    # Coordinates are optional, but if one is present both must be valid.
+    latitude  = None
+    longitude = None
+    if latitude_raw or longitude_raw:
+        if not (latitude_raw and longitude_raw):
+            errors.append("Both latitude and longitude must be provided together.")
+        else:
+            latitude, err = parse_coordinate(latitude_raw, minimum=-90.0, maximum=90.0)
+            if err:
+                errors.append(f"Invalid latitude ({err}).")
+            longitude, err = parse_coordinate(longitude_raw, minimum=-180.0, maximum=180.0)
+            if err:
+                errors.append(f"Invalid longitude ({err}).")
 
     if errors:
         return jsonify({"errors": errors}), 400
@@ -207,13 +241,13 @@ def create_report():
                 """
                 INSERT INTO reports
                     (name, category, location, description,
-                     photo, photo_type, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, name, category, location, description,
-                          (photo IS NOT NULL) AS has_photo, created_at
+                     latitude, longitude, photo, photo_type, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name, category, location, latitude, longitude,
+                          description, (photo IS NOT NULL) AS has_photo, created_at
                 """,
                 (name, category, location, description,
-                 data, content_type, created_at),
+                 latitude, longitude, data, content_type, created_at),
             )
             row = cur.fetchone()
         db.commit()
@@ -221,15 +255,7 @@ def create_report():
         app.logger.exception("DB insert failed")
         return jsonify({"errors": ["Could not save report."]}), 500
 
-    return jsonify({
-        "id":          row["id"],
-        "name":        row["name"],
-        "category":    row["category"],
-        "location":    row["location"],
-        "description": row["description"],
-        "photo":       f"/api/reports/{row['id']}/photo" if row["has_photo"] else "",
-        "date":        row["created_at"].isoformat() if row["created_at"] else "",
-    }), 201
+    return jsonify(shape_report(row)), 201
 
 
 # --------------------------------------------------------------------------- #

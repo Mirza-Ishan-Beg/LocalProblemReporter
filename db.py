@@ -21,12 +21,19 @@ CREATE TABLE IF NOT EXISTS reports (
     id          SERIAL       PRIMARY KEY,
     name        VARCHAR(80)  NOT NULL,
     category    VARCHAR(32)  NOT NULL,
-    location    VARCHAR(200) NOT NULL,
+    location    VARCHAR(500) NOT NULL,
+    latitude    DOUBLE PRECISION,
+    longitude   DOUBLE PRECISION,
     description TEXT         NOT NULL,
     photo       BYTEA,
     photo_type  VARCHAR(50),
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+-- Idempotent migrations for existing databases
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+ALTER TABLE reports ALTER COLUMN location TYPE VARCHAR(500);
 
 CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category);
 """
