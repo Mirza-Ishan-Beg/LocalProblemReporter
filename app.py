@@ -3,106 +3,132 @@ Local Problem Reporter — Flask backend.
 
 Endpoints
 ---------
-GET    /                             → serves index.html
-GET    /api/reports                  → list reports (?category=Pothole)
-GET    /api/reports/<id>/photo       → serve the stored image bytes
-POST   /api/reports                  → create a report (multipart/form-data)
-DELETE /api/reports                  → delete ALL reports
-DELETE /api/reports/<id>             → delete ONE report
-POST   /api/chat                     → chat with the LLM assistant
-
-Storage
--------
-- Rows    → Postgres (Aiven).        DATABASE_URL
-- Photos  → Postgres BYTEA column.
-- LLM     → pluggable provider.      LLM_PROVIDER + GROQ_API_KEY
+GET    /                     → serves index.html
+GET    /uploads/<filename>   → serves an uploaded photo
+GET    /api/reports          → list reports (?category=Pothole)
+POST   /api/reports          → create a report (multipart/form-data)
+DELETE /api/reports          → delete ALL reports
+DELETE /api/reports/<id>     → delete ONE report
+POST   /api/stt-proxy        → proxy audio to Sarvam Speech-to-Text
+POST   /api/doc/submit       → proxy digitise job submission
+GET    /api/doc/status/<id>  → proxy job status poll
+GET    /api/doc/download/<id>→ proxy signed download
 """
 
 import os
+import sqlite3
+import uuid
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-load_dotenv(".env.local")
-import requests
-from flask import (
-    Flask, jsonify, render_template, request, Response
-)
 
-from db import init_db, get_db, close_db
-from llm import get_provider
+import requests
+
+from flask import (
+    Flask, g, jsonify, render_template, request,
+    send_from_directory, Response,
+)
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+DB_PATH = os.path.join(BASE_DIR, "reports.db")
+
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 VALID_CATEGORIES = {
     "Pothole", "Garbage", "Streetlight",
     "Drainage", "Pollution", "Other",
 }
 
-MAX_REQUEST_BYTES = 8 * 1024 * 1024
-MAX_PHOTO_BYTES   = 2 * 1024 * 1024
+MAX_REQUEST_BYTES = 8 * 1024 * 1024   # whole multipart request
+MAX_PHOTO_BYTES   = 2 * 1024 * 1024   # per photo (matches frontend check)
 
 MAX_NAME        = 80
 MAX_LOCATION    = 200
 MAX_DESCRIPTION = 500
 
-MAX_CHAT_MESSAGES    = 20
-MAX_CHAT_CHARS       = 2000
-CONTEXT_REPORT_LIMIT = 20
+# Sarvam
+SARVAM_API_KEY  = os.environ.get("SARVAM_API_KEY", "").strip()
+SARVAM_STT_URL  = "https://api.sarvam.ai/speech-to-text"
+SARVAM_DOC_BASE = "https://api.sarvam.ai/doc-ai/v1"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
-# Bootstrap schema once at startup
-init_db(app)
-
-# Register teardown
-app.teardown_appcontext(close_db)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # --------------------------------------------------------------------------- #
-# Helpers
+# Database helpers
 # --------------------------------------------------------------------------- #
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(_exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute("PRAGMA journal_mode = WAL")
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT    NOT NULL,
+                category    TEXT    NOT NULL,
+                location    TEXT    NOT NULL,
+                description TEXT    NOT NULL,
+                photo       TEXT,
+                created_at  TEXT    NOT NULL
+            )
+            """
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reports_category "
+            "ON reports(category)"
+        )
+        db.commit()
+
+
+init_db()
+
+
+def row_to_dict(row):
+    return {
+        "id":          row["id"],
+        "name":        row["name"],
+        "category":    row["category"],
+        "location":    row["location"],
+        "description": row["description"],
+        "photo":       f"/uploads/{row['photo']}" if row["photo"] else "",
+        "date":        row["created_at"],
+    }
+
+
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def build_system_prompt() -> str:
-    """Inject a short summary of recent reports so the bot has context."""
-    with get_db().cursor() as cur:
-        cur.execute(
-            "SELECT category, location, description "
-            "FROM reports ORDER BY id DESC LIMIT %s",
-            (CONTEXT_REPORT_LIMIT,),
-        )
-        rows = cur.fetchall()
-
-    if not rows:
-        context = "No reports have been submitted yet."
-    else:
-        lines = [
-            f"- [{r['category']}] {r['location']}: {r['description'][:120]}"
-            for r in rows
-        ]
-        context = "Recent community reports:\n" + "\n".join(lines)
-
-    return (
-        "You are the Local Problem Reporter assistant — a concise, "
-        "helpful bot for a neighborhood issue-reporting site. "
-        "Users submit potholes, garbage, streetlight, drainage, and "
-        "pollution reports. Help them understand the site, find "
-        "reports, and think about what to submit.\n\n"
-        f"{context}\n\n"
-        "Keep answers short (2–4 sentences) unless asked for detail."
-    )
-
-
 # --------------------------------------------------------------------------- #
-# Pages
+# Pages & static files
 # --------------------------------------------------------------------------- #
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+@app.get("/uploads/<path:filename>")
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_DIR, filename)
 
 
 # --------------------------------------------------------------------------- #
@@ -111,56 +137,21 @@ def index():
 @app.get("/api/reports")
 def list_reports():
     category = request.args.get("category", "All")
-    if category and category != "All" and category not in VALID_CATEGORIES:
-        return jsonify({"errors": ["Unknown category."]}), 400
 
-    with get_db().cursor() as cur:
-        if category and category != "All":
-            cur.execute(
-                "SELECT id, name, category, location, description, "
-                "(photo IS NOT NULL) AS has_photo, created_at "
-                "FROM reports WHERE category = %s ORDER BY id DESC",
-                (category,),
-            )
-        else:
-            cur.execute(
-                "SELECT id, name, category, location, description, "
-                "(photo IS NOT NULL) AS has_photo, created_at "
-                "FROM reports ORDER BY id DESC"
-            )
-        rows = cur.fetchall()
+    db = get_db()
+    if category and category != "All":
+        if category not in VALID_CATEGORIES:
+            return jsonify({"errors": ["Unknown category."]}), 400
+        rows = db.execute(
+            "SELECT * FROM reports WHERE category = ? ORDER BY id DESC",
+            (category,),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM reports ORDER BY id DESC"
+        ).fetchall()
 
-    def shape(r):
-        return {
-            "id":          r["id"],
-            "name":        r["name"],
-            "category":    r["category"],
-            "location":    r["location"],
-            "description": r["description"],
-            "photo":       f"/api/reports/{r['id']}/photo" if r["has_photo"] else "",
-            "date":        r["created_at"].isoformat() if r["created_at"] else "",
-        }
-
-    return jsonify([shape(r) for r in rows])
-
-
-@app.get("/api/reports/<int:report_id>/photo")
-def get_report_photo(report_id):
-    with get_db().cursor() as cur:
-        cur.execute(
-            "SELECT photo, photo_type FROM reports WHERE id = %s",
-            (report_id,),
-        )
-        row = cur.fetchone()
-
-    if row is None or not row["photo"]:
-        return jsonify({"errors": ["No photo found."]}), 404
-
-    return Response(
-        bytes(row["photo"]),
-        mimetype=row["photo_type"] or "image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    return jsonify([row_to_dict(r) for r in rows])
 
 
 # --------------------------------------------------------------------------- #
@@ -191,55 +182,61 @@ def create_report():
     if errors:
         return jsonify({"errors": errors}), 400
 
-    data = photo.read()
-    if not data:
-        return jsonify({"errors": ["The uploaded photo is empty."]}), 400
-    if len(data) > MAX_PHOTO_BYTES:
+    photo.stream.seek(0, os.SEEK_END)
+    size = photo.stream.tell()
+    photo.stream.seek(0)
+    if size > MAX_PHOTO_BYTES:
         return jsonify({"errors": ["Photo must be smaller than 2 MB."]}), 400
+    if size == 0:
+        return jsonify({"errors": ["The uploaded photo is empty."]}), 400
 
-    content_type = photo.mimetype or "application/octet-stream"
-    created_at = datetime.now(timezone.utc)
+    ext = photo.filename.rsplit(".", 1)[1].lower()
+    stored_name = f"{uuid.uuid4().hex}.{ext}"
+    photo.save(os.path.join(UPLOAD_DIR, stored_name))
 
-    try:
-        db = get_db()
-        with db.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO reports
-                    (name, category, location, description,
-                     photo, photo_type, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, name, category, location, description,
-                          (photo IS NOT NULL) AS has_photo, created_at
-                """,
-                (name, category, location, description,
-                 data, content_type, created_at),
-            )
-            row = cur.fetchone()
-        db.commit()
-    except Exception:
-        app.logger.exception("DB insert failed")
-        return jsonify({"errors": ["Could not save report."]}), 500
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    return jsonify({
-        "id":          row["id"],
-        "name":        row["name"],
-        "category":    row["category"],
-        "location":    row["location"],
-        "description": row["description"],
-        "photo":       f"/api/reports/{row['id']}/photo" if row["has_photo"] else "",
-        "date":        row["created_at"].isoformat() if row["created_at"] else "",
-    }), 201
+    db = get_db()
+    cur = db.execute(
+        """
+        INSERT INTO reports (name, category, location, description, photo, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (name, category, location, description, stored_name, created_at),
+    )
+    db.commit()
+
+    row = db.execute(
+        "SELECT * FROM reports WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+
+    return jsonify(row_to_dict(row)), 201
 
 
 # --------------------------------------------------------------------------- #
 # API — delete
 # --------------------------------------------------------------------------- #
+def _delete_photo(filename):
+    if not filename:
+        return
+    path = os.path.join(UPLOAD_DIR, filename)
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 @app.delete("/api/reports")
 def clear_reports():
     db = get_db()
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM reports")
+    rows = db.execute(
+        "SELECT photo FROM reports WHERE photo IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        _delete_photo(r["photo"])
+
+    db.execute("DELETE FROM reports")
     db.commit()
     return jsonify({"ok": True})
 
@@ -247,53 +244,176 @@ def clear_reports():
 @app.delete("/api/reports/<int:report_id>")
 def delete_report(report_id):
     db = get_db()
-    with db.cursor() as cur:
-        cur.execute("SELECT id FROM reports WHERE id = %s", (report_id,))
-        row = cur.fetchone()
-        if row is None:
-            return jsonify({"errors": ["Report not found."]}), 404
-        cur.execute("DELETE FROM reports WHERE id = %s", (report_id,))
+    row = db.execute(
+        "SELECT photo FROM reports WHERE id = ?", (report_id,)
+    ).fetchone()
+    if row is None:
+        return jsonify({"errors": ["Report not found."]}), 404
+
+    _delete_photo(row["photo"])
+    db.execute("DELETE FROM reports WHERE id = ?", (report_id,))
     db.commit()
     return jsonify({"ok": True})
 
 
 # --------------------------------------------------------------------------- #
-# API — chat
+# API — Sarvam Speech-to-Text proxy
 # --------------------------------------------------------------------------- #
-@app.post("/api/chat")
-def chat():
-    payload = request.get_json(silent=True) or {}
-    incoming = payload.get("messages")
+@app.post("/api/stt-proxy")
+def stt_proxy():
+    if not SARVAM_API_KEY:
+        return jsonify({"errors": ["SARVAM_API_KEY not configured on server."]}), 500
 
-    if not isinstance(incoming, list) or not incoming:
-        return jsonify({"errors": ["messages must be a non-empty list."]}), 400
+    audio = request.files.get("file")
+    if not audio:
+        return jsonify({"errors": ["No audio file received."]}), 400
 
-    cleaned = []
-    for m in incoming[-MAX_CHAT_MESSAGES:]:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        content = (m.get("content") or "").strip()
-        if role not in {"user", "assistant"} or not content:
-            continue
-        cleaned.append({"role": role, "content": content[:MAX_CHAT_CHARS]})
+    language = request.form.get("language_code", "en-IN")
+    model    = request.form.get("model", "saarika:v2")
 
-    if not cleaned:
-        return jsonify({"errors": ["No valid messages."]}), 400
+    files = {
+        "file": (
+            audio.filename or "speech.webm",
+            audio.stream,
+            audio.mimetype or "audio/webm",
+        )
+    }
+    data = {
+        "model": model,
+        "language_code": language,
+    }
+    headers = {"api-subscription-key": SARVAM_API_KEY}
 
     try:
-        provider = get_provider()
-        system = build_system_prompt()
-        reply = provider.chat([{"role": "system", "content": system}, *cleaned])
-        return jsonify({"reply": reply, "provider": provider.name})
-    except NotImplementedError as e:
-        return jsonify({"errors": [str(e)]}), 501
-    except requests.HTTPError as e:
-        app.logger.exception("LLM HTTP error")
-        return jsonify({"errors": [f"LLM provider error: {e}"]}), 502
-    except Exception:
-        app.logger.exception("Chat failed")
-        return jsonify({"errors": ["Chat failed. Try again."]}), 500
+        r = requests.post(
+            SARVAM_STT_URL,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=60,
+        )
+    except requests.Timeout:
+        return jsonify({"errors": ["Sarvam STT timed out."]}), 504
+    except requests.RequestException as e:
+        return jsonify({"errors": [f"Sarvam request failed: {str(e)}"]}), 502
+
+    return Response(
+        r.content,
+        status=r.status_code,
+        content_type=r.headers.get("Content-Type", "application/json"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# API — Sarvam Doc-AI proxy (submit / status / download)
+# --------------------------------------------------------------------------- #
+@app.post("/api/doc/submit")
+def doc_submit():
+    if not SARVAM_API_KEY:
+        return jsonify({"errors": ["SARVAM_API_KEY not configured."]}), 500
+
+    doc = request.files.get("file")
+    if not doc or not doc.filename:
+        return jsonify({"errors": ["No document file received."]}), 400
+
+    files = {
+        "file": (
+            doc.filename,
+            doc.stream,
+            doc.mimetype or "application/octet-stream",
+        )
+    }
+    data = {
+        "language":      request.form.get("language", "en-IN"),
+        "output_format": request.form.get("output_format", "html"),
+        "content_type":  request.form.get("content_type", "printed"),
+        "auto_orient":   request.form.get("auto_orient", "true"),
+    }
+    headers = {"api-subscription-key": SARVAM_API_KEY}
+
+    try:
+        r = requests.post(
+            f"{SARVAM_DOC_BASE}/job/digitise",
+            headers=headers, files=files, data=data, timeout=180,
+        )
+    except requests.Timeout:
+        return jsonify({"errors": ["Sarvam submit timed out."]}), 504
+    except requests.RequestException as e:
+        return jsonify({"errors": [f"Sarvam submit failed: {e}"]}), 502
+
+    return Response(
+        r.content,
+        status=r.status_code,
+        content_type=r.headers.get("Content-Type", "application/json"),
+    )
+
+
+@app.get("/api/doc/status/<job_id>")
+def doc_status(job_id):
+    if not SARVAM_API_KEY:
+        return jsonify({"errors": ["SARVAM_API_KEY not configured."]}), 500
+
+    headers = {"api-subscription-key": SARVAM_API_KEY}
+
+    try:
+        r = requests.get(
+            f"{SARVAM_DOC_BASE}/job/{job_id}/status",
+            headers=headers, timeout=30,
+        )
+    except requests.Timeout:
+        return jsonify({"errors": ["Sarvam status timed out."]}), 504
+    except requests.RequestException as e:
+        return jsonify({"errors": [f"Sarvam status failed: {e}"]}), 502
+
+    return Response(
+        r.content,
+        status=r.status_code,
+        content_type=r.headers.get("Content-Type", "application/json"),
+    )
+
+
+@app.get("/api/doc/download/<job_id>")
+def doc_download(job_id):
+    if not SARVAM_API_KEY:
+        return jsonify({"errors": ["SARVAM_API_KEY not configured."]}), 500
+
+    headers = {"api-subscription-key": SARVAM_API_KEY}
+
+    # Step 1 — get signed URL from Sarvam
+    try:
+        link_res = requests.get(
+            f"{SARVAM_DOC_BASE}/job/{job_id}/download-url",
+            headers=headers, timeout=30,
+        )
+    except requests.Timeout:
+        return jsonify({"errors": ["Download-url request timed out."]}), 504
+    except requests.RequestException as e:
+        return jsonify({"errors": [f"Download-url request failed: {e}"]}), 502
+
+    if not link_res.ok:
+        return Response(
+            link_res.content,
+            status=link_res.status_code,
+            content_type="application/json",
+        )
+
+    link = link_res.json()
+    url       = link.get("url")
+    dl_headers = link.get("headers") or {}
+
+    if not url:
+        return jsonify({"errors": ["Sarvam did not return a download URL."]}), 502
+
+    # Step 2 — fetch the actual content through the proxy (no CORS for browser)
+    try:
+        out = requests.get(url, headers=dl_headers, timeout=180)
+    except requests.Timeout:
+        return jsonify({"errors": ["Content download timed out."]}), 504
+    except requests.RequestException as e:
+        return jsonify({"errors": [f"Content download failed: {e}"]}), 502
+
+    content_type = out.headers.get("Content-Type", "application/octet-stream")
+    return Response(out.content, status=out.status_code, content_type=content_type)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,13 +431,6 @@ def not_found(_e):
     return render_template("index.html"), 404
 
 
-@app.errorhandler(405)
-def method_not_allowed(_e):
-    if request.path.startswith("/api/"):
-        return jsonify({"errors": ["Method not allowed."]}), 405
-    return "Method not allowed", 405
-
-
 @app.errorhandler(500)
 def server_error(_e):
     if request.path.startswith("/api/"):
@@ -325,8 +438,6 @@ def server_error(_e):
     return "Internal server error", 500
 
 
-# --------------------------------------------------------------------------- #
-# Local dev
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
