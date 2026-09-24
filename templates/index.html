@@ -114,11 +114,17 @@
                                                 <input id="photo" name="photo" type="file" accept="image/*" required>
                                         </label>
                                         <div id="preview" class="preview hidden"></div>
-                                        <label>Description
-                                                <textarea id="description" name="description" rows="5" maxlength="500"
-                                                        placeholder="Briefly explain the problem..."
-                                                        required></textarea>
-                                        </label>
+                                       <label>Description
+    <div class="desc-tools">
+        <button type="button" id="micBtn" class="mic-btn" title="Speak to type">
+            🎤 <span id="micLabel">Speak</span>
+        </button>
+        <span id="micStatus" class="mic-status"></span>
+    </div>
+    <textarea id="description" name="description" rows="5" maxlength="500"
+        placeholder="Briefly explain the problem... (ya bolne ke liye 🎤 dabayein)"
+        required></textarea>
+</label>
                                         <button class="btn full" type="submit">Submit Report</button>
                                         <p id="formMessage" class="form-message"></p>
                                 </form>

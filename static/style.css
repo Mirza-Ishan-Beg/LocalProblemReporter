@@ -335,3 +335,72 @@ html[data-theme="dark"] .chat-input-row input {
     color: var(--ink);
     border-color: #34443b;
 }
+/* ---------- Speech-to-Text ---------- */
+.desc-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 7px;
+    margin-bottom: 4px;
+}
+
+.mic-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid #a9c2b5;
+    background: #fff;
+    color: var(--green);
+    border-radius: 999px;
+    padding: 7px 14px;
+    font: inherit;
+    font-weight: 750;
+    font-size: .85rem;
+    cursor: pointer;
+    transition: .2s;
+}
+
+.mic-btn:hover {
+    background: var(--green);
+    color: #fff;
+    transform: translateY(-1px);
+}
+
+/* Recording state */
+.mic-btn.recording {
+    background: #e53935;
+    color: #fff;
+    border-color: #e53935;
+    animation: pulseMic 1.2s infinite;
+}
+
+@keyframes pulseMic {
+    0%   { box-shadow: 0 0 0 0 rgba(229, 57, 53, .55); }
+    70%  { box-shadow: 0 0 0 12px rgba(229, 57, 53, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(229, 57, 53, 0); }
+}
+
+.mic-status {
+    font-size: .82rem;
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.mic-status.live {
+    color: #e53935;
+    font-weight: 800;
+}
+
+/* Dark mode */
+html[data-theme="dark"] .mic-btn {
+    background: #111815;
+    color: #8fd0b1;
+    border-color: #527765;
+}
+
+html[data-theme="dark"] .mic-btn:hover,
+html[data-theme="dark"] .mic-btn.recording {
+    background: #e53935;
+    color: #fff;
+    border-color: #e53935;
+}

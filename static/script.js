@@ -1,4 +1,3 @@
-
 /* ---------------- dark/light mode ---------------- */
 
 const themeToggle = document.getElementById("themeToggle");
@@ -371,7 +370,6 @@ form.addEventListener("submit", async e => {
         form.reset();
 
         preview.classList.add("hidden");
-
         preview.innerHTML = "";
 
         message.textContent =
@@ -468,70 +466,238 @@ loadReports();
 
 /* ---------------- chat widget ---------------- */
 (() => {
-        const toggle = document.getElementById("chatToggle");
-        const panel = document.getElementById("chatPanel");
-        const closeBtn = document.getElementById("chatClose");
-        const msgBox = document.getElementById("chatMessages");
-        const form = document.getElementById("chatForm");
-        const input = document.getElementById("chatInput");
+    const toggle = document.getElementById("chatToggle");
+    const panel = document.getElementById("chatPanel");
+    const closeBtn = document.getElementById("chatClose");
+    const msgBox = document.getElementById("chatMessages");
+    const chatForm = document.getElementById("chatForm");
+    const input = document.getElementById("chatInput");
 
-        if (!toggle || !panel || !form) return;   // widget not present → no-op
+    if (!toggle || !panel || !chatForm) return;   // widget not present → no-op
 
-        // Conversation history sent to the server each turn.
-        const history = [];
+    const history = [];
 
-        const addMsg = (role, text) => {
-                const el = document.createElement("div");
-                el.className = `chat-msg ${role}`;
-                el.textContent = text;
-                msgBox.appendChild(el);
-                msgBox.scrollTop = msgBox.scrollHeight;
-                return el;
+    const addMsg = (role, text) => {
+        const el = document.createElement("div");
+        el.className = `chat-msg ${role}`;
+        el.textContent = text;
+        msgBox.appendChild(el);
+        msgBox.scrollTop = msgBox.scrollHeight;
+        return el;
+    };
+
+    toggle.addEventListener("click", () => {
+        panel.classList.toggle("hidden");
+        if (!panel.classList.contains("hidden")) input.focus();
+    });
+
+    closeBtn.addEventListener("click", () => panel.classList.add("hidden"));
+
+    chatForm.addEventListener("submit", async e => {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+
+        addMsg("user", text);
+        history.push({ role: "user", content: text });
+        input.value = "";
+        input.disabled = true;
+
+        const thinking = addMsg("assistant", "…");
+
+        try {
+            const res = await fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: history }),
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+                thinking.remove();
+                addMsg("error", (data.errors || ["Something went wrong."]).join(" "));
+                history.pop();
+                return;
+            }
+
+            thinking.textContent = data.reply;
+            history.push({ role: "assistant", content: data.reply });
+        } catch (err) {
+            thinking.remove();
+            addMsg("error", "Network error — could not reach the assistant.");
+            history.pop();
+        } finally {
+            input.disabled = false;
+            input.focus();
+        }
+    });
+})();
+
+
+/* ---------------- speech to text via Sarvam (30s max) ---------------- */
+(() => {
+    const micBtn    = document.getElementById("micBtn");
+    const micLabel  = document.getElementById("micLabel");
+    const micStatus = document.getElementById("micStatus");
+    const descBox   = document.getElementById("description");
+
+    if (!micBtn || !descBox) return;
+
+    const MAX_SECONDS = 30;
+    const LANG = "en-IN";   // Hindi ke liye "hi-IN"
+
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+        micBtn.disabled = true;
+        micBtn.title = "Recording not supported in this browser";
+        micStatus.textContent = "⚠️ Ye browser recording support nahi karta";
+        return;
+    }
+
+    let mediaRecorder = null;
+    let chunks        = [];
+    let stream        = null;
+    let isRecording   = false;
+    let timeLeft      = MAX_SECONDS;
+    let timerId       = null;
+
+    const pickMime = () => {
+        const opts = [
+            "audio/webm;codecs=opus",
+            "audio/webm",
+            "audio/ogg;codecs=opus",
+            "audio/mp4",
+        ];
+        return opts.find((m) => MediaRecorder.isTypeSupported(m)) || "";
+    };
+
+    async function transcribeBlob(blob) {
+        const fd = new FormData();
+        const ext = blob.type.includes("ogg") ? "ogg"
+                  : blob.type.includes("mp4") ? "mp4"
+                  : "webm";
+
+        fd.append("file", blob, `speech.${ext}`);
+        fd.append("model", "saarika:v2");
+        fd.append("language_code", LANG);
+
+        const res = await fetch("/api/stt-proxy", {
+            method: "POST",
+            body: fd,
+        });
+
+        if (!res.ok) {
+            let msg = `STT failed (${res.status})`;
+            try {
+                const j = await res.json();
+                if (j.errors) msg = j.errors.join(" ");
+            } catch { /* ignore */ }
+            throw new Error(msg);
+        }
+
+        const data = await res.json();
+        return (data.transcript || "").trim();
+    }
+
+    async function startRecording() {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    channelCount: 1,
+                    sampleRate: 16000,
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                },
+            });
+        } catch (err) {
+            micStatus.textContent = "❌ Mic permission denied ya mic nahi mila";
+            return;
+        }
+
+        const mime = pickMime();
+        mediaRecorder = mime
+            ? new MediaRecorder(stream, { mimeType: mime })
+            : new MediaRecorder(stream);
+
+        chunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) chunks.push(e.data);
         };
 
-        toggle.addEventListener("click", () => {
-                panel.classList.toggle("hidden");
-                if (!panel.classList.contains("hidden")) input.focus();
-        });
+        mediaRecorder.onstop = async () => {
+            stream.getTracks().forEach((t) => t.stop());
+            stream = null;
 
-        closeBtn.addEventListener("click", () => panel.classList.add("hidden"));
+            if (!chunks.length) {
+                micStatus.textContent = "Koi audio record nahi hua.";
+                return;
+            }
 
-        form.addEventListener("submit", async e => {
-                e.preventDefault();
-                const text = input.value.trim();
-                if (!text) return;
+            const blob = new Blob(chunks, {
+                type: mediaRecorder.mimeType || "audio/webm",
+            });
 
-                addMsg("user", text);
-                history.push({ role: "user", content: text });
-                input.value = "";
-                input.disabled = true;
+            micStatus.textContent = "⏳ Transcribe ho raha hai…";
 
-                const thinking = addMsg("assistant", "…");
+            try {
+                const text = await transcribeBlob(blob);
 
-                try {
-                        const res = await fetch("/api/chat", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ messages: history }),
-                        });
-                        const data = await res.json();
-
-                        if (!res.ok) {
-                                thinking.remove();
-                                addMsg("error", (data.errors || ["Something went wrong."]).join(" "));
-                                history.pop();                 // don't keep failed user turn
-                                return;
-                        }
-
-                        thinking.textContent = data.reply;
-                        history.push({ role: "assistant", content: data.reply });
-                } catch (err) {
-                        thinking.remove();
-                        addMsg("error", "Network error — could not reach the assistant.");
-                        history.pop();
-                } finally {
-                        input.disabled = false;
-                        input.focus();
+                if (!text) {
+                    micStatus.textContent = "Kuch samajh nahi aaya, dobara try karein.";
+                    return;
                 }
-        });
+
+                const existing = descBox.value.trim();
+                const sep = existing ? " " : "";
+                descBox.value = (existing + sep + text).slice(0, 500);
+
+                micStatus.textContent = "✔ Text add ho gaya";
+                setTimeout(() => {
+                    if (!isRecording) micStatus.textContent = "";
+                }, 2500);
+
+            } catch (err) {
+                console.error(err);
+                micStatus.textContent = "❌ " + err.message;
+            }
+        };
+
+        mediaRecorder.start();
+
+        isRecording = true;
+        micBtn.classList.add("recording");
+        micLabel.textContent = "Stop";
+        micStatus.classList.add("live");
+
+        timeLeft = MAX_SECONDS;
+        micStatus.textContent = `🔴 Recording… ${timeLeft}s bache`;
+
+        timerId = setInterval(() => {
+            timeLeft--;
+            if (isRecording) micStatus.textContent = `🔴 Recording… ${timeLeft}s bache`;
+            if (timeLeft <= 0) stopRecording(true);
+        }, 1000);
+    }
+
+    function stopRecording(auto) {
+        if (!isRecording) return;
+        isRecording = false;
+
+        if (timerId) { clearInterval(timerId); timerId = null; }
+
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+        }
+
+        micBtn.classList.remove("recording");
+        micLabel.textContent = "Speak";
+        micStatus.classList.remove("live");
+
+        if (auto) micStatus.textContent = "⏱ 30s poore — transcribe ho raha hai…";
+    }
+
+    micBtn.addEventListener("click", () => {
+        if (isRecording) stopRecording(false);
+        else startRecording();
+    });
 })();
